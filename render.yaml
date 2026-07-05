@@ -39,11 +39,18 @@ services:
       # turn on AI-written drafts; unset = a built-in template writes them instead.
       - key: GROQ_API_KEY
         sync: false
-      # Email OTP verification. Set ONE of RESEND_API_KEY (resend.com) or
-      # BREVO_API_KEY (brevo.com, 300 free emails/day) to send real codes.
-      # Until set, verification runs in demo mode (code shown on screen).
-      # EMAIL_FROM e.g. "Rivet <you@yourdomain.com>" — must be a sender your
-      # provider allows (Brevo: a verified sender; Resend: a verified domain).
+      # Email OTP verification. Configure ONE of: SMTP_* (nodemailer — e.g.
+      # Gmail app password), RESEND_API_KEY, or BREVO_API_KEY. Until one is
+      # set, email verification is skipped (signups proceed unverified).
+      # EMAIL_FROM e.g. "Rivet <you@yourdomain.com>"; defaults to SMTP_USER.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
       - key: RESEND_API_KEY
         sync: false
       - key: BREVO_API_KEY

@@ -581,7 +581,7 @@ function landing(demandGeo = []) {
 }
 
 // ---------- auth ----------
-function authForm(kind, { role = 'worker', error = '', google = false, ref = '', refName = '' } = {}) {
+function authForm(kind, { role = 'worker', error = '', google = false, sms = false, ref = '', refName = '' } = {}) {
   const isSignup = kind === 'signup';
   const refQ = ref ? '&ref='+encodeURIComponent(ref) : '';
   const googleBtn = google ? `
@@ -589,91 +589,157 @@ function authForm(kind, { role = 'worker', error = '', google = false, ref = '',
         <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
         ${t('auth_google')}
       </a>` : '';
-  const phoneBtn = `
+  const phoneBtn = sms ? `
       <a class="gbtn full" id="phonebtn" href="/phone?role=${esc(role)}${refQ}">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="#13212B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="3"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
         ${t('auth_phone')}
-      </a>`;
-  const googleBlock = `${googleBtn}${phoneBtn}<div class="or"><span>${t('auth_or')}</span></div>`;
-  return `<section class="wrap narrow">
-    <div class="card auth">
+      </a>` : '';
+  const googleBlock = (googleBtn || phoneBtn) ? `${googleBtn}${phoneBtn}<div class="or"><span>${t('auth_or')}</span></div>` : '';
+  return `${authSceneOpen()}
+    <div class="card auth auth-v2">
+      ${authBrand()}
       <h2>${isSignup?t('auth_create'):t('auth_welcome')}</h2>
+      <p class="auth-sub">${isSignup?T('Free for workers — takes about a minute.'):T('Good to see you again.')}</p>
       ${ref&&refName&&isSignup?`<div class="crew-invite">${icon('spark','xic')} ${T('You’re joining')} <b>${esc(refName)}</b>${T('’s crew on Rivet — free for workers, always.')}</div>`:''}
       ${error?`<div class="err">${esc(error)}</div>`:''}
       ${googleBlock}
       <form method="post" action="/${kind}">
         ${ref?`<input type="hidden" name="ref" value="${esc(ref)}">`:''}
         ${isSignup?`
-          <label>${t('auth_iam')}
-            <select name="role">
-              <option value="worker" ${role==='worker'?'selected':''}>${t('auth_worker_opt')}</option>
-              <option value="employer" ${role==='employer'?'selected':''}>${t('auth_employer_opt')}</option>
-            </select>
-          </label>
-          <label>${t('auth_fullname')} <input name="name" required></label>
-          <label class="emp-only">${t('auth_company')} <input name="company"></label>
+          <div class="role-seg" role="radiogroup" aria-label="${t('auth_iam')}">
+            <label class="role-opt"><input type="radio" name="role" value="worker" ${role!=='employer'?'checked':''}>
+              <span class="ro-emoji">🛠️</span><span class="ro-t">${t('auth_worker_opt')}</span><span class="ro-s">${T('Find jobs & shifts')}</span></label>
+            <label class="role-opt"><input type="radio" name="role" value="employer" ${role==='employer'?'checked':''}>
+              <span class="ro-emoji">🏗️</span><span class="ro-t">${t('auth_employer_opt')}</span><span class="ro-s">${T('Hire verified crews')}</span></label>
+          </div>
+          <label>${t('auth_fullname')} <input name="name" required autocomplete="name"></label>
+          <label class="emp-only">${t('auth_company')} <input name="company" autocomplete="organization"></label>
         `:''}
-        <label>${t('auth_email')} <input type="email" name="email" required></label>
-        <label>${t('auth_password')} <input type="password" name="pass" required minlength="6"></label>
+        <label>${t('auth_email')} <input type="email" name="email" required autocomplete="email"></label>
+        <label>${t('auth_password')}
+          <span class="pw-wrap"><input type="password" name="pass" required minlength="6" id="authpw" autocomplete="${isSignup?'new-password':'current-password'}">
+          <button type="button" class="pw-eye" id="pweye" aria-label="${T('Show password')}">👁</button></span>
+        </label>
         <button class="btn full" type="submit">${isSignup?t('auth_create_btn'):t('auth_login_btn')}</button>
       </form>
-      <p class="muted">${isSignup?`${t('auth_have')} <a href="/login">${t('auth_login_btn')}</a>`:`${t('auth_new')} <a href="/signup">${t('nav_get_started')}</a>`}</p>
+      <p class="auth-foot">${isSignup?`${t('auth_have')} <a href="/login">${t('auth_login_btn')}</a>`:`${t('auth_new')} <a href="/signup">${t('nav_get_started')}</a>`}</p>
+      <div class="auth-trust"><span>🔒 ${T('Encrypted')}</span><span>✅ ${T('Verified employers')}</span><span>🚫 ${T('No spam, ever')}</span></div>
     </div>
   </section>
   <script>
-    const sel=document.querySelector('select[name=role]');
-    const gb=document.getElementById('gbtn');
-    const pb=document.getElementById('phonebtn');
-    if(sel){const t=()=>{document.querySelectorAll('.emp-only').forEach(e=>e.style.display=sel.value==='employer'?'block':'none');if(gb)gb.href='/auth/google?role='+sel.value;if(pb)pb.href='/phone?role='+sel.value;};sel.onchange=t;t();}
+    (function(){
+      var radios=[].slice.call(document.querySelectorAll('input[name=role]'));
+      var gb=document.getElementById('gbtn'), pb=document.getElementById('phonebtn');
+      function tog(){var c=document.querySelector('input[name=role]:checked');var v=c?c.value:'worker';
+        [].forEach.call(document.querySelectorAll('.emp-only'),function(e){e.style.display=v==='employer'?'block':'none'});
+        if(gb)gb.href='/auth/google?role='+v; if(pb)pb.href='/phone?role='+v;}
+      radios.forEach(function(r){r.addEventListener('change',tog)}); if(radios.length)tog();
+      var pw=document.getElementById('authpw'), eye=document.getElementById('pweye');
+      if(eye&&pw)eye.addEventListener('click',function(){var s=pw.type==='password';pw.type=s?'text':'password';eye.textContent=s?'🙈':'👁';});
+    })();
+  </script>`;
+}
+
+// shared shell for the auth screens: animated gradient blobs + rising card
+function authSceneOpen(){
+  return `<section class="auth-scene"><div class="auth-blob b1"></div><div class="auth-blob b2"></div><div class="auth-blob b3"></div>`;
+}
+function authBrand(){
+  return `<div class="auth-brand"><span class="auth-logo">R</span>
+    <span class="auth-brandname">Rivet <i>×</i> Crewline<small>${T('The blue-collar hiring platform')}</small></span></div>`;
+}
+// six-box OTP input: auto-advance, backspace nav, paste, auto-submit when complete.
+// Degrades to the plain fallback input if JS is off (noscript reveals it).
+function otpFieldset(){
+  let boxes = '';
+  for(let i=0;i<6;i++) boxes += `<input class="otp-box" type="text" inputmode="numeric" maxlength="1" aria-label="${T('Digit')} ${i+1}" ${i===0?'autocomplete="one-time-code" autofocus':''}>`;
+  return `<div class="otp-row">${boxes}</div>
+  <input type="hidden" name="code" id="otpcode">
+  <noscript><style>.otp-row{display:none}</style><label>${T('6-digit code')} <input name="code" inputmode="numeric" maxlength="6" pattern="[0-9]*" placeholder="123456"></label></noscript>
+  <script>
+    (function(){
+      var boxes=[].slice.call(document.querySelectorAll('.otp-box'));
+      var hidden=document.getElementById('otpcode');
+      if(!boxes.length||!hidden)return;
+      var form=hidden.form, sent=false;
+      function sync(){
+        hidden.value=boxes.map(function(b){return b.value}).join('');
+        boxes.forEach(function(b){b.classList.toggle('filled',!!b.value)});
+        if(hidden.value.length===6&&!sent){sent=true;form.submit();}
+      }
+      boxes.forEach(function(b,i){
+        b.addEventListener('input',function(){
+          b.value=b.value.replace(/\\D/g,'').slice(-1);
+          if(b.value&&i<5)boxes[i+1].focus();
+          sync();
+        });
+        b.addEventListener('keydown',function(e){
+          if(e.key==='Backspace'&&!b.value&&i>0){boxes[i-1].value='';boxes[i-1].focus();sync();e.preventDefault();}
+        });
+        b.addEventListener('paste',function(e){
+          var d=((e.clipboardData||window.clipboardData).getData('text')||'').replace(/\\D/g,'').slice(0,6);
+          if(!d)return; e.preventDefault();
+          d.split('').forEach(function(ch,j){if(boxes[j])boxes[j].value=ch;});
+          boxes[Math.min(d.length,5)].focus(); sync();
+        });
+      });
+    })();
   </script>`;
 }
 
 // ---------- phone (SMS OTP) ----------
 function phoneStart({ role='worker', name='', phone='', error='' }){
-  return `<section class="wrap narrow"><div class="card auth">
-    <h2>${t('phone_h')}</h2>
-    <p class="muted">${t('phone_sub')}</p>
-    ${error?`<div class="err">${esc(error)}</div>`:''}
-    <form method="post" action="/phone/start">
-      <input type="hidden" name="role" value="${esc(role)}">
-      <label>${t('phone_number')} <input name="phone" type="tel" inputmode="tel" autocomplete="tel" value="${esc(phone)}" placeholder="+1 555 123 4567" required></label>
-      <label>${t('phone_yourname')} <input name="name" value="${esc(name)}" autocomplete="name"></label>
-      <button class="btn full" type="submit">${t('phone_textme')}</button>
-    </form>
-    <p class="muted">${t('phone_prefer')} <a href="/login">${t('nav_login')}</a> · <a href="/signup">${t('nav_get_started')}</a></p>
-  </div></section>`;
+  return `${authSceneOpen()}
+    <div class="card auth auth-v2">
+      ${authBrand()}
+      <h2>${t('phone_h')}</h2>
+      <p class="auth-sub">${t('phone_sub')}</p>
+      ${error?`<div class="err">${esc(error)}</div>`:''}
+      <form method="post" action="/phone/start">
+        <input type="hidden" name="role" value="${esc(role)}">
+        <label>${t('phone_number')} <input name="phone" type="tel" inputmode="tel" autocomplete="tel" value="${esc(phone)}" placeholder="+1 555 123 4567" required></label>
+        <label>${t('phone_yourname')} <input name="name" value="${esc(name)}" autocomplete="name"></label>
+        <button class="btn full" type="submit">${t('phone_textme')}</button>
+      </form>
+      <p class="auth-foot">${t('phone_prefer')} <a href="/login">${t('nav_login')}</a> · <a href="/signup">${t('nav_get_started')}</a></p>
+    </div>
+  </section>`;
 }
-function verifyEmail({ email, demoCode='', error='', next='' }){
-  return `<section class="wrap narrow"><div class="card auth">
-    <h2>${T('Verify your email')}</h2>
-    <p class="muted">${T('We sent a 6-digit code to')} <b>${esc(email)}</b>.</p>
-    ${demoCode?`<div class="ok-card">${T('Demo mode (no email provider connected yet): your code is')} <b style="font-size:18px;letter-spacing:2px">${esc(demoCode)}</b></div>`:''}
-    ${error?`<div class="err">${esc(error)}</div>`:''}
-    <form method="post" action="/verify-email">
-      <input type="hidden" name="next" value="${esc(next)}">
-      <label>${T('6-digit code')} <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" placeholder="123456" required autofocus></label>
-      <button class="btn full" type="submit">${T('Verify & continue')}</button>
-    </form>
-    <form method="post" action="/verify-email/resend" style="margin-top:10px">
-      <input type="hidden" name="next" value="${esc(next)}">
-      <button class="btn ghost full" type="submit">${T('Resend code')}</button>
-    </form>
-    <p class="muted" style="margin-top:10px">${T('Wrong address?')} <a href="/logout">${T('Start over')}</a></p>
-  </div></section>`;
+function verifyEmail({ email, error='', next='' }){
+  return `${authSceneOpen()}
+    <div class="card auth auth-v2 auth-center">
+      <div class="auth-mailart">📬</div>
+      <h2>${T('Verify your email')}</h2>
+      <p class="auth-sub">${T('We sent a 6-digit code to')} <b>${esc(email)}</b>.<br>${T('Check your inbox — and your spam folder.')}</p>
+      ${error?`<div class="err">${esc(error)}</div>`:''}
+      <form method="post" action="/verify-email">
+        <input type="hidden" name="next" value="${esc(next)}">
+        ${otpFieldset()}
+        <button class="btn full" type="submit">${T('Verify & continue')}</button>
+      </form>
+      <form method="post" action="/verify-email/resend" style="margin-top:10px">
+        <input type="hidden" name="next" value="${esc(next)}">
+        <button class="btn ghost full" type="submit">${T('Resend code')}</button>
+      </form>
+      <p class="auth-foot">${T('Wrong address?')} <a href="/logout">${T('Start over')}</a></p>
+    </div>
+  </section>`;
 }
-function phoneVerify({ phone, demoCode='', error='' }){
-  return `<section class="wrap narrow"><div class="card auth">
-    <h2>${T('Enter your code')}</h2>
-    <p class="muted">${T('We sent a 6-digit code to')} <b>${esc(phone)}</b>.</p>
-    ${demoCode?`<div class="ok-card">${T('Demo mode (no SMS provider connected yet): your code is')} <b style="font-size:18px;letter-spacing:2px">${esc(demoCode)}</b></div>`:''}
-    ${error?`<div class="err">${esc(error)}</div>`:''}
-    <form method="post" action="/phone/verify">
-      <input type="hidden" name="phone" value="${esc(phone)}">
-      <label>${T('6-digit code')} <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" placeholder="123456" required></label>
-      <button class="btn full" type="submit">${T('Verify & continue')}</button>
-    </form>
-    <p class="muted"><a href="/phone">${T('Use a different number')}</a></p>
-  </div></section>`;
+function phoneVerify({ phone, error='' }){
+  return `${authSceneOpen()}
+    <div class="card auth auth-v2 auth-center">
+      <div class="auth-mailart">💬</div>
+      <h2>${T('Enter your code')}</h2>
+      <p class="auth-sub">${T('We sent a 6-digit code to')} <b>${esc(phone)}</b>.</p>
+      ${error?`<div class="err">${esc(error)}</div>`:''}
+      <form method="post" action="/phone/verify">
+        <input type="hidden" name="phone" value="${esc(phone)}">
+        ${otpFieldset()}
+        <button class="btn full" type="submit">${T('Verify & continue')}</button>
+      </form>
+      <p class="auth-foot"><a href="/phone">${T('Use a different number')}</a></p>
+    </div>
+  </section>`;
 }
 
 // ---------- worker onboarding ----------

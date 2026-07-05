@@ -1372,6 +1372,9 @@ async function migrate() {
   // DEFAULT 1 grandfathers every existing account (incl. demo seeds) as verified;
   // fresh email/password signups are explicitly set to 0 until they enter their OTP.
   try { await db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 1'); } catch (e) { /* column exists */ }
+  // brute-force guard: wrong-code attempts per live OTP (code dies after 5 misses)
+  try { await db.exec('ALTER TABLE email_otp ADD COLUMN tries INTEGER DEFAULT 0'); } catch (e) { /* column exists */ }
+  try { await db.exec('ALTER TABLE otp ADD COLUMN tries INTEGER DEFAULT 0'); } catch (e) { /* column exists */ }
   // indexes on migrated columns — must run after the ALTERs above, not in createSchema()
   try { await db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_status_sector ON jobs(status, sector)'); } catch (e) { console.error('[db] idx_jobs_status_sector:', e.message); }
   try { await db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_apply ON jobs(apply_url)'); } catch (e) { console.error('[db] idx_jobs_apply:', e.message); }

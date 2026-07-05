@@ -3,6 +3,23 @@
  * Rivet x Crewline - HTTP server.
  * Run:  node server.js   (or: npm start)
  */
+// Load .env before anything reads process.env (db.js reads TURSO_* at require time).
+// Real env vars set by the host always win; .env only fills in what's missing.
+(function loadDotEnv(){
+  try {
+    const fs = require('fs'), path = require('path');
+    const p = path.join(__dirname, '.env');
+    if(!fs.existsSync(p)) return;
+    for(const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)){
+      if(line.trim().startsWith('#')) continue;
+      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if(!m) continue;
+      let v = m[2].trim();
+      if((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if(!(m[1] in process.env)) process.env[m[1]] = v;
+    }
+  } catch(e){ console.error('[env] .env load skipped:', e.message); }
+})();
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -39,15 +56,38 @@ async function sendSms(to, body){
   } catch(e){ console.error('sms send', e); return false; }
 }
 
-// ---- email (OTP verification) — same $0 philosophy as SMS: works in demo mode with no
-// provider (code shown on screen); set RESEND_API_KEY or BREVO_API_KEY for real delivery.
+// ---- email (OTP verification) — real delivery only, no on-screen demo codes.
+// Configure ONE of: SMTP_* (nodemailer — Gmail app password or any SMTP server),
+// RESEND_API_KEY, or BREVO_API_KEY. When none is set, email verification is
+// skipped entirely (signups proceed unverified) rather than dead-ending users.
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const smtpEnabled = !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
-const EMAIL_FROM = process.env.EMAIL_FROM || 'Rivet x Crewline <onboarding@resend.dev>';
-const emailEnabled = !!(RESEND_API_KEY || BREVO_API_KEY);
+const EMAIL_FROM = process.env.EMAIL_FROM || (smtpEnabled ? SMTP_USER : 'Rivet x Crewline <onboarding@resend.dev>');
+const emailEnabled = smtpEnabled || !!(RESEND_API_KEY || BREVO_API_KEY);
+let _mailer = null;
+function mailer(){
+  if(!_mailer){
+    const nodemailer = require('nodemailer');
+    _mailer = nodemailer.createTransport({
+      host: SMTP_HOST, port: SMTP_PORT,
+      secure: SMTP_PORT === 465, // 465 = implicit TLS; 587 upgrades via STARTTLS
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+  }
+  return _mailer;
+}
 async function sendEmailMsg(to, subject, text){
   if(!emailEnabled) return false;
   try {
+    if(smtpEnabled){
+      await mailer().sendMail({ from: EMAIL_FROM, to, subject, text });
+      return true;
+    }
     if(RESEND_API_KEY){
       const r = await fetch('https://api.resend.com/emails', {
         method:'POST', headers:{ Authorization:`Bearer ${RESEND_API_KEY}`, 'Content-Type':'application/json' },
@@ -67,11 +107,15 @@ async function sendEmailMsg(to, subject, text){
     return r.ok;
   } catch(e){ console.error('email send', e); return false; }
 }
-// mint + store a 6-digit code for this email (10-min expiry) and try to deliver it
+// mint + store a 6-digit code for this email (10-min expiry) and try to deliver it.
+// Throttled: an unexpired code younger than 30s is reused silently (no re-send),
+// so the resend button / repeated logins can't be used to spam a mailbox.
 async function issueEmailCode(email){
-  const code = String(Math.floor(100000 + Math.random()*900000));
-  await db.prepare(`INSERT INTO email_otp(email,code,expires) VALUES(?,?,datetime('now','+10 minutes'))
-    ON CONFLICT(email) DO UPDATE SET code=excluded.code, expires=excluded.expires, created_at=datetime('now')`).run(email, code);
+  const recent = await db.prepare("SELECT 1 FROM email_otp WHERE email=? AND expires > datetime('now') AND created_at > datetime('now','-30 seconds')").get(email);
+  if(recent) return { sent:false, throttled:true };
+  const code = String(crypto.randomInt(100000, 1000000));
+  await db.prepare(`INSERT INTO email_otp(email,code,expires,tries) VALUES(?,?,datetime('now','+10 minutes'),0)
+    ON CONFLICT(email) DO UPDATE SET code=excluded.code, expires=excluded.expires, tries=0, created_at=datetime('now')`).run(email, code);
   const sent = await sendEmailMsg(email, `${code} is your Rivet x Crewline code`,
     `Your Rivet x Crewline verification code is ${code}. It expires in 10 minutes.\n\nIf you didn't request this, you can ignore this email.`);
   return { code, sent };
@@ -81,6 +125,28 @@ function safeNext(v, user){
   v = String(v||'');
   if(!v.startsWith('/') || v.startsWith('//')) v = '';
   return v || (user && user.role==='employer' ? '/console' : '/app');
+}
+// ---- brute-force guard: sliding-window rate limiter (in-memory, per key) ----
+const _rl = new Map();
+function rlCount(key, windowMs){
+  const now = Date.now();
+  const arr = (_rl.get(key) || []).filter(t => now - t < windowMs);
+  _rl.set(key, arr);
+  return arr.length;
+}
+function rlAdd(key){
+  const arr = _rl.get(key) || [];
+  arr.push(Date.now()); _rl.set(key, arr);
+  if(_rl.size > 10000) _rl.clear(); // cheap memory cap; worst case counters reset
+}
+function rateLimited(key, max, windowMs){
+  if(rlCount(key, windowMs) >= max) return true;
+  rlAdd(key);
+  return false;
+}
+function clientIp(req){
+  const xf = String(req.headers['x-forwarded-for']||'').split(',')[0].trim();
+  return xf || (req.socket && req.socket.remoteAddress) || '';
 }
 
 function baseUrl(req){
@@ -861,34 +927,49 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/signup' && method==='GET'){
       const ref = url.searchParams.get('ref')||'';
       let refName=''; if(ref){ const r=await db.prepare('SELECT name,role FROM users WHERE id=?').get(Number(ref)); if(r && r.role==='worker') refName = r.name; }
-      return send(res, V.layout({title:'Sign up', user:null, body:V.authForm('signup',{role:url.searchParams.get('role')||'worker', google:googleEnabled, ref:refName?ref:'', refName})}));
+      return send(res, V.layout({title:'Sign up', user:null, body:V.authForm('signup',{role:url.searchParams.get('role')||'worker', google:googleEnabled, sms:smsEnabled, ref:refName?ref:'', refName})}));
     }
     // crew referral link → worker signup pre-tagged with the inviter
     const rmatch = p.match(/^\/r\/(\d+)$/);
     if(rmatch && method==='GET') return redirect(res, `/signup?role=worker&ref=${rmatch[1]}`);
     if(p==='/login' && method==='GET')
-      return send(res, V.layout({title:'Log in', user:null, body:V.authForm('login',{google:googleEnabled})}));
+      return send(res, V.layout({title:'Log in', user:null, body:V.authForm('login',{google:googleEnabled, sms:smsEnabled})}));
 
-    // ---- phone (SMS OTP) login ----
-    if(p==='/phone' && method==='GET')
+    // ---- phone (SMS OTP) login — real SMS only; unavailable until Twilio creds are set ----
+    if(p==='/phone' && method==='GET'){
+      if(!smsEnabled) return send(res, V.layout({title:'Phone sign in', user:null,
+        body:V.phoneStart({role:url.searchParams.get('role')||'worker', error:'Phone sign-in isn’t available yet on this server. Use email signup instead.'})}));
       return send(res, V.layout({title:'Phone sign in', user:null, body:V.phoneStart({role:url.searchParams.get('role')||'worker'})}));
+    }
     if(p==='/phone/start' && method==='POST'){
       const b = await readBody(req);
       const role = b.role==='employer'?'employer':'worker';
       const name = String(b.name||'').trim().slice(0,80);
       const ph = normPhone(b.phone);
+      if(!smsEnabled) return send(res, V.layout({title:'Phone sign in',user:null,body:V.phoneStart({role,name,phone:b.phone,error:'Phone sign-in isn’t available yet on this server. Use email signup instead.'})}));
       if(!validPhone(ph)) return send(res, V.layout({title:'Phone sign in',user:null,body:V.phoneStart({role,name,phone:b.phone,error:'Enter a valid phone number (10+ digits, include country code).'})}));
-      const code = String(Math.floor(100000 + Math.random()*900000));
-      await db.prepare("INSERT INTO otp(phone,code,expires,role,name) VALUES(?,?,datetime('now','+10 minutes'),?,?) ON CONFLICT(phone) DO UPDATE SET code=excluded.code, expires=excluded.expires, role=excluded.role, name=excluded.name, created_at=datetime('now')").run(ph, code, role, name);
-      await sendSms(ph, `${code} is your Rivet × Crewline verification code.`);
-      return send(res, V.layout({title:'Enter code',user:null,body:V.phoneVerify({phone:ph, demoCode: smsEnabled ? '' : code})}));
+      // SMS costs real money — strict caps per number and per connection
+      if(rateLimited('smsph:'+ph, 3, 60*60*1000) || rateLimited('smsip:'+clientIp(req), 8, 60*60*1000))
+        return send(res, V.layout({title:'Phone sign in',user:null,body:V.phoneStart({role,name,phone:b.phone,error:'Too many codes requested. Try again in an hour.'})}));
+      const code = String(crypto.randomInt(100000, 1000000));
+      await db.prepare("INSERT INTO otp(phone,code,expires,role,name,tries) VALUES(?,?,datetime('now','+10 minutes'),?,?,0) ON CONFLICT(phone) DO UPDATE SET code=excluded.code, expires=excluded.expires, role=excluded.role, name=excluded.name, tries=0, created_at=datetime('now')").run(ph, code, role, name);
+      const sent = await sendSms(ph, `${code} is your Rivet × Crewline verification code.`);
+      if(!sent) return send(res, V.layout({title:'Phone sign in',user:null,body:V.phoneStart({role,name,phone:b.phone,error:'We couldn’t send the text. Double-check the number and try again.'})}));
+      return send(res, V.layout({title:'Enter code',user:null,body:V.phoneVerify({phone:ph})}));
     }
     if(p==='/phone/verify' && method==='POST'){
       const b = await readBody(req);
       const ph = normPhone(b.phone);
       const code = String(b.code||'').trim();
-      const row = await db.prepare("SELECT * FROM otp WHERE phone=? AND code=? AND expires > datetime('now')").get(ph, code);
-      if(!row) return send(res, V.layout({title:'Enter code',user:null,body:V.phoneVerify({phone:ph, demoCode:'', error:'That code is invalid or expired. Try again.'})}));
+      const live = await db.prepare("SELECT * FROM otp WHERE phone=? AND expires > datetime('now')").get(ph);
+      const row = (live && (live.tries||0) < 5 && live.code === code) ? live : null;
+      if(!row){
+        if(live){
+          await db.prepare('UPDATE otp SET tries=tries+1 WHERE phone=?').run(ph);
+          if((live.tries||0)+1 >= 5) await db.prepare('DELETE FROM otp WHERE phone=?').run(ph); // 5 misses kills the code
+        }
+        return send(res, V.layout({title:'Enter code',user:null,body:V.phoneVerify({phone:ph, error:'That code is invalid or expired. Try again.'})}));
+      }
       let u = await db.prepare('SELECT * FROM users WHERE phone=?').get(ph);
       const role = row.role==='employer'?'employer':'worker';
       if(!u){
@@ -906,27 +987,31 @@ const server = http.createServer(async (req,res)=>{
       return redirect(res, u.role==='employer' ? '/console' : '/app');
     }
 
-    // ---- email OTP verification (new email/password accounts) ----
+    // ---- email OTP verification (new email/password accounts; active only with a real provider) ----
     if(p==='/verify-email' && method==='GET'){
       if(!user) return redirect(res,'/login');
-      if(user.email_verified!==0) return redirect(res, user.role==='employer'?'/console':'/app');
+      if(!emailEnabled || user.email_verified!==0) return redirect(res, user.role==='employer'?'/console':'/app');
       const next = safeNext(url.searchParams.get('next'), user);
-      // reuse the pending code on refresh; only mint a new one when none is live
-      let row = await db.prepare("SELECT code FROM email_otp WHERE email=? AND expires > datetime('now')").get(user.email);
-      if(!row) row = { code: (await issueEmailCode(user.email)).code };
+      // reuse the pending code on refresh; only mint + send a new one when none is live
+      const row = await db.prepare("SELECT 1 FROM email_otp WHERE email=? AND expires > datetime('now')").get(user.email);
+      if(!row) await issueEmailCode(user.email);
       return send(res, V.layout({title:'Verify your email', user:null,
-        body:V.verifyEmail({email:user.email, demoCode: emailEnabled ? '' : row.code, next})}));
+        body:V.verifyEmail({email:user.email, next})}));
     }
     if(p==='/verify-email' && method==='POST'){
       if(!user) return redirect(res,'/login');
       const b = await readBody(req);
       const next = safeNext(b.next, user);
       const code = String(b.code||'').trim();
-      const row = await db.prepare("SELECT 1 FROM email_otp WHERE email=? AND code=? AND expires > datetime('now')").get(user.email, code);
-      if(!row){
-        const live = await db.prepare("SELECT code FROM email_otp WHERE email=? AND expires > datetime('now')").get(user.email);
+      const live = await db.prepare("SELECT code,tries FROM email_otp WHERE email=? AND expires > datetime('now')").get(user.email);
+      const ok = live && (live.tries||0) < 5 && live.code === code;
+      if(!ok){
+        if(live){
+          await db.prepare('UPDATE email_otp SET tries=tries+1 WHERE email=?').run(user.email);
+          if((live.tries||0)+1 >= 5) await db.prepare('DELETE FROM email_otp WHERE email=?').run(user.email); // 5 misses kills the code
+        }
         return send(res, V.layout({title:'Verify your email', user:null,
-          body:V.verifyEmail({email:user.email, demoCode: (!emailEnabled && live) ? live.code : '', next, error:'That code is invalid or expired. Try again.'})}));
+          body:V.verifyEmail({email:user.email, next, error:'That code is invalid or expired. Try again.'})}));
       }
       await db.prepare('UPDATE users SET email_verified=1 WHERE id=?').run(user.id);
       await db.prepare('DELETE FROM email_otp WHERE email=?').run(user.email);
@@ -935,7 +1020,8 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/verify-email/resend' && method==='POST'){
       if(!user) return redirect(res,'/login');
       const b = await readBody(req);
-      if(user.email_verified===0) await issueEmailCode(user.email);
+      if(emailEnabled && user.email_verified===0 && !rateLimited('resend:'+user.id, 5, 15*60*1000))
+        await issueEmailCode(user.email); // also self-throttles to one send per 30s
       return redirect(res, '/verify-email?next=' + encodeURIComponent(safeNext(b.next, user)));
     }
 
@@ -957,30 +1043,42 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/signup' && method==='POST'){
       const b = await readBody(req);
       const role = b.role==='employer'?'employer':'worker';
-      if(!b.email||!b.pass||!b.name) return send(res, V.layout({title:'Sign up',user:null,body:V.authForm('signup',{role,google:googleEnabled,error:'All fields are required.'})}));
+      if(rateLimited('signup:'+clientIp(req), 20, 60*60*1000))
+        return send(res, V.layout({title:'Sign up',user:null,body:V.authForm('signup',{role,google:googleEnabled,sms:smsEnabled,error:'Too many signups from this connection. Try again later.'})}));
+      if(!b.email||!b.pass||!b.name) return send(res, V.layout({title:'Sign up',user:null,body:V.authForm('signup',{role,google:googleEnabled,sms:smsEnabled,error:'All fields are required.'})}));
       try{
         const refId = (role==='worker' && Number(b.ref)) ? Number(b.ref) : null;
         const email = b.email.toLowerCase().trim();
         const info = await db.prepare('INSERT INTO users(email,pass,role,name,company,referred_by) VALUES(?,?,?,?,?,?)')
           .run(email, hashPassword(b.pass), role, b.name.trim(), role==='employer'?(b.company||'').trim():null, refId);
         setSession(req, res, info.lastInsertRowid);
-        // email/password signups verify their address first (OTP); Google/phone accounts skip this
-        await db.prepare('UPDATE users SET email_verified=0 WHERE id=?').run(info.lastInsertRowid);
-        await issueEmailCode(email);
         // new employers set up their company first so worker-facing job pages aren't empty
         const dest = role==='employer'?'/console/company?welcome=1':'/app/onboard';
-        return redirect(res, '/verify-email?next=' + encodeURIComponent(dest));
+        // email/password signups verify their address first (OTP) — only when a real
+        // email provider is configured; Google/phone accounts always skip this
+        if(emailEnabled){
+          await db.prepare('UPDATE users SET email_verified=0 WHERE id=?').run(info.lastInsertRowid);
+          await issueEmailCode(email);
+          return redirect(res, '/verify-email?next=' + encodeURIComponent(dest));
+        }
+        return redirect(res, dest);
       }catch(e){
-        return send(res, V.layout({title:'Sign up',user:null,body:V.authForm('signup',{role,google:googleEnabled,error:'That email is already registered.'})}));
+        return send(res, V.layout({title:'Sign up',user:null,body:V.authForm('signup',{role,google:googleEnabled,sms:smsEnabled,error:'That email is already registered.'})}));
       }
     }
     if(p==='/login' && method==='POST'){
       const b = await readBody(req);
-      const u = await db.prepare('SELECT * FROM users WHERE email=?').get((b.email||'').toLowerCase().trim());
-      if(!u || !verifyPassword(b.pass||'', u.pass))
-        return send(res, V.layout({title:'Log in',user:null,body:V.authForm('login',{google:googleEnabled,error:'Invalid email or password.'})}));
+      const emailLc = (b.email||'').toLowerCase().trim();
+      const rlKey = 'login:'+clientIp(req)+':'+emailLc;
+      if(rlCount(rlKey, 15*60*1000) >= 10)
+        return send(res, V.layout({title:'Log in',user:null,body:V.authForm('login',{google:googleEnabled,sms:smsEnabled,error:'Too many failed attempts. Try again in 15 minutes.'})}));
+      const u = await db.prepare('SELECT * FROM users WHERE email=?').get(emailLc);
+      if(!u || !verifyPassword(b.pass||'', u.pass)){
+        rlAdd(rlKey); // only failures count toward the lockout
+        return send(res, V.layout({title:'Log in',user:null,body:V.authForm('login',{google:googleEnabled,sms:smsEnabled,error:'Invalid email or password.'})}));
+      }
       setSession(req, res, u.id);
-      if(u.email_verified===0){ await issueEmailCode(u.email); return redirect(res,'/verify-email'); }
+      if(emailEnabled && u.email_verified===0){ await issueEmailCode(u.email); return redirect(res,'/verify-email'); }
       return redirect(res, u.role==='employer'?'/console':'/app');
     }
     if(p==='/logout'){ clearSession(req, res); return redirect(res,'/'); }
@@ -1045,7 +1143,7 @@ const server = http.createServer(async (req,res)=>{
     // ---- worker (Rivet) ----
     if(p.startsWith('/app')){
       if(!user) return redirect(res,'/login');
-      if(user.email_verified===0) return redirect(res,'/verify-email');
+      if(emailEnabled && user.email_verified===0) return redirect(res,'/verify-email');
       let prof = await getProfile(user.id);
 
       if(p==='/app/onboard' && method==='GET') return send(res, V.layout({title:'Set up',user,active:'',body:V.workerOnboard()}));
@@ -1558,7 +1656,7 @@ const server = http.createServer(async (req,res)=>{
     // ---- employer (Crewline) ----
     if(p.startsWith('/console')){
       if(!user) return redirect(res,'/login');
-      if(user.email_verified===0) return redirect(res,'/verify-email');
+      if(emailEnabled && user.email_verified===0) return redirect(res,'/verify-email');
 
       if(p==='/console' && method==='GET'){
         const jobs = await db.prepare(`SELECT * FROM jobs WHERE employer_id=?`).all(user.id);
