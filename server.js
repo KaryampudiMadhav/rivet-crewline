@@ -73,24 +73,27 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
 const EMAIL_FROM = process.env.EMAIL_FROM || (smtpEnabled ? SMTP_USER : 'Rivet x Crewline <onboarding@resend.dev>');
 const emailEnabled = smtpEnabled || !!(RESEND_API_KEY || BREVO_API_KEY);
-let _mailer = null;
-function mailer(){
-  if(!_mailer){
-    const nodemailer = require('nodemailer');
-    _mailer = nodemailer.createTransport({
-      host: SMTP_HOST, port: SMTP_PORT,
-      secure: SMTP_PORT === 465, // 465 = implicit TLS; 587 upgrades via STARTTLS
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      // fail fast: a wrong port/password must not hang signups for minutes
-      connectionTimeout: 8000, greetingTimeout: 8000, socketTimeout: 15000,
-    });
-  }
-  return _mailer;
+// Build the transport against an explicitly-resolved IPv4 address: some hosts
+// (Render) have no IPv6 route, and nodemailer does its own DNS lookups, so the
+// global ipv4first preference is not enough. TLS still verifies the real
+// hostname via SNI (tls.servername). Resolved per send — OTP volume is tiny
+// and this stays correct if the provider rotates IPs.
+async function smtpTransport(){
+  const nodemailer = require('nodemailer');
+  const { address } = await require('dns').promises.lookup(SMTP_HOST, { family: 4 });
+  return nodemailer.createTransport({
+    host: address, port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // 465 = implicit TLS; 587 upgrades via STARTTLS
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+    tls: { servername: SMTP_HOST },
+    // fail fast: a wrong port/password must not hang signups for minutes
+    connectionTimeout: 8000, greetingTimeout: 8000, socketTimeout: 15000,
+  });
 }
 // probed at boot so /healthz can say WHY email is broken (never leaks secrets)
 let smtpStatus = smtpEnabled ? 'checking…' : '';
 if(smtpEnabled){
-  setTimeout(()=>{ mailer().verify()
+  setTimeout(()=>{ smtpTransport().then(m=>m.verify())
     .then(()=>{ smtpStatus='ok'; console.log('[auth] smtp check: ok'); })
     .catch(e=>{ smtpStatus='FAILED — '+String(e.message||e).slice(0,120); console.error('[auth] smtp check failed:', e.message); }); }, 3000);
 }
@@ -98,7 +101,8 @@ async function sendEmailMsg(to, subject, text){
   if(!emailEnabled) return false;
   try {
     if(smtpEnabled){
-      await mailer().sendMail({ from: EMAIL_FROM, to, subject, text });
+      const m = await smtpTransport();
+      await m.sendMail({ from: EMAIL_FROM, to, subject, text });
       return true;
     }
     if(RESEND_API_KEY){
@@ -832,7 +836,7 @@ const server = http.createServer(async (req,res)=>{
       const emailLine = emailEnabled
         ? 'on' + (smtpEnabled ? ` (smtp ${SMTP_HOST}:${SMTP_PORT} — ${smtpStatus})` : (RESEND_API_KEY ? ' (resend)' : ' (brevo)'))
         : 'OFF — set SMTP_HOST+SMTP_USER+SMTP_PASS (or BREVO_API_KEY / RESEND_API_KEY)';
-      return res.end(`ok\nemail-otp: ${emailLine}\nsms: ${smsEnabled?'on':'off'}\ngoogle: ${googleEnabled?'on':'off'}\ndb: ${process.env.TURSO_DATABASE_URL?'turso':'local-file'}`);
+      return res.end(`ok\nbuild: ${(process.env.RENDER_GIT_COMMIT||'local').slice(0,7)}\nemail-otp: ${emailLine}\nsms: ${smsEnabled?'on':'off'}\ngoogle: ${googleEnabled?'on':'off'}\ndb: ${process.env.TURSO_DATABASE_URL?'turso':'local-file'}`);
     }
     if(p==='/robots.txt'){ res.writeHead(200,{'Content-Type':'text/plain'}); return res.end('User-agent: *\nAllow: /\nAllow: /jobs\nDisallow: /app\nDisallow: /console\nDisallow: /auth\n\nSitemap: https://rivet-crewline.onrender.com/sitemap.xml\n'); }
     if(p==='/sitemap.xml'){
