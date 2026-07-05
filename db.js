@@ -168,6 +168,12 @@ async function createSchema() {
       role TEXT, name TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS email_otp (
+      email TEXT PRIMARY KEY,
+      code TEXT NOT NULL,
+      expires TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS media (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER REFERENCES users(id),
@@ -1363,6 +1369,9 @@ async function migrate() {
   try { await db.exec('ALTER TABLE worker_profiles ADD COLUMN open_to_extra INTEGER DEFAULT 0'); } catch (e) { /* wants to stack multiple jobs/shifts */ }
   try { await db.exec("ALTER TABLE jobs ADD COLUMN hire_type TEXT DEFAULT 'direct'"); } catch (e) { /* direct (employer hires) | agency (staffing/temp firm) */ }
   try { await db.exec("ALTER TABLE jobs ADD COLUMN dupe_of INTEGER"); } catch (e) { /* set when this posting is a cross-source mirror of another (hidden from the board) */ }
+  // DEFAULT 1 grandfathers every existing account (incl. demo seeds) as verified;
+  // fresh email/password signups are explicitly set to 0 until they enter their OTP.
+  try { await db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 1'); } catch (e) { /* column exists */ }
   // indexes on migrated columns — must run after the ALTERs above, not in createSchema()
   try { await db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_status_sector ON jobs(status, sector)'); } catch (e) { console.error('[db] idx_jobs_status_sector:', e.message); }
   try { await db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_apply ON jobs(apply_url)'); } catch (e) { console.error('[db] idx_jobs_apply:', e.message); }

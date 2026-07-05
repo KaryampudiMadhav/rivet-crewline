@@ -39,6 +39,17 @@ services:
       # turn on AI-written drafts; unset = a built-in template writes them instead.
       - key: GROQ_API_KEY
         sync: false
+      # Email OTP verification. Set ONE of RESEND_API_KEY (resend.com) or
+      # BREVO_API_KEY (brevo.com, 300 free emails/day) to send real codes.
+      # Until set, verification runs in demo mode (code shown on screen).
+      # EMAIL_FROM e.g. "Rivet <you@yourdomain.com>" — must be a sender your
+      # provider allows (Brevo: a verified sender; Resend: a verified domain).
+      - key: RESEND_API_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
     # ---- Persistent data (PAID plan only) ----
     # To keep data permanently: upgrade `plan` above to `starter`, uncomment
     # the disk block below, and change RIVET_DATA_DIR above to /var/data.

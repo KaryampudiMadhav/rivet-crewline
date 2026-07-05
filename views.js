@@ -643,6 +643,24 @@ function phoneStart({ role='worker', name='', phone='', error='' }){
     <p class="muted">${t('phone_prefer')} <a href="/login">${t('nav_login')}</a> · <a href="/signup">${t('nav_get_started')}</a></p>
   </div></section>`;
 }
+function verifyEmail({ email, demoCode='', error='', next='' }){
+  return `<section class="wrap narrow"><div class="card auth">
+    <h2>${T('Verify your email')}</h2>
+    <p class="muted">${T('We sent a 6-digit code to')} <b>${esc(email)}</b>.</p>
+    ${demoCode?`<div class="ok-card">${T('Demo mode (no email provider connected yet): your code is')} <b style="font-size:18px;letter-spacing:2px">${esc(demoCode)}</b></div>`:''}
+    ${error?`<div class="err">${esc(error)}</div>`:''}
+    <form method="post" action="/verify-email">
+      <input type="hidden" name="next" value="${esc(next)}">
+      <label>${T('6-digit code')} <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" placeholder="123456" required autofocus></label>
+      <button class="btn full" type="submit">${T('Verify & continue')}</button>
+    </form>
+    <form method="post" action="/verify-email/resend" style="margin-top:10px">
+      <input type="hidden" name="next" value="${esc(next)}">
+      <button class="btn ghost full" type="submit">${T('Resend code')}</button>
+    </form>
+    <p class="muted" style="margin-top:10px">${T('Wrong address?')} <a href="/logout">${T('Start over')}</a></p>
+  </div></section>`;
+}
 function phoneVerify({ phone, demoCode='', error='' }){
   return `<section class="wrap narrow"><div class="card auth">
     <h2>${T('Enter your code')}</h2>
@@ -3753,5 +3771,5 @@ function whyRivetBlock(){
   </div>`;
 }
 
-module.exports = { setLang, setEs, drainEsMisses, layout, landing, authForm, phoneStart, phoneVerify, workerOnboard, workerHome, workerJobs,
+module.exports = { setLang, setEs, drainEsMisses, layout, landing, authForm, phoneStart, phoneVerify, verifyEmail, workerOnboard, workerHome, workerJobs,
   jobDetail, workerProfile, resumeDoc, workerApplications, workerOffers, publicPortfolio, empOverview, empAnalytics, empJobs, empJobForm, empPipeline, empSearch, empCandidate, empShortlist, inbox, ogImage, STAGES, JOB_TYPES, DURATIONS, empCompany, workerTraining, pulsePage, publicJob, workerCoach, agentApplyResult, onboardChat, agentsHub, workHub, SPONSORSHIP, SECTOR_META, sectorHub, sectorPage, mockInterview, LEARN_TRACKS, ROLE_BLS, careerHub, careerGuide, landJob, trustVerdict, trustCard, earnLearn, credPrep, credPrepIndex, credPath, gradeQuiz, skillCheckIndex, skillCheck, gradeSkill, skillKeyFor, parseSkillchecks, skillVerifiedRow, growHub, invitePage, shiftsBoard, sourcingAgent, empShifts, empShiftForm, voiceAgent, whyPage, SHIFT_KINDS, REGISTRY };
