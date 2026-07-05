@@ -78,39 +78,56 @@ const emailEnabled = smtpEnabled || !!(RESEND_API_KEY || BREVO_API_KEY);
 // global ipv4first preference is not enough. TLS still verifies the real
 // hostname via SNI (tls.servername). Resolved per send — OTP volume is tiny
 // and this stays correct if the provider rotates IPs.
-async function smtpTransport(){
+async function smtpTransport(port){
   const nodemailer = require('nodemailer');
   const { address } = await require('dns').promises.lookup(SMTP_HOST, { family: 4 });
   return nodemailer.createTransport({
-    host: address, port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // 465 = implicit TLS; 587 upgrades via STARTTLS
+    host: address, port,
+    secure: port === 465, // 465 = implicit TLS; 587 upgrades via STARTTLS
     auth: { user: SMTP_USER, pass: SMTP_PASS },
     tls: { servername: SMTP_HOST },
     // fail fast: a wrong port/password must not hang signups for minutes
     connectionTimeout: 8000, greetingTimeout: 8000, socketTimeout: 15000,
   });
 }
+// Hosts differ in which SMTP ports they allow out — self-heal by probing the
+// configured port first, then the usual alternate (465 ⇄ 587).
+const SMTP_ALT_PORT = SMTP_PORT === 465 ? 587 : 465;
+let smtpWorkingPort = 0; // discovered at boot (or on first successful send)
 // probed at boot so /healthz can say WHY email is broken (never leaks secrets)
 let smtpStatus = smtpEnabled ? 'checking…' : '';
 if(smtpEnabled){
-  setTimeout(()=>{ smtpTransport().then(m=>m.verify())
-    .then(()=>{ smtpStatus='ok'; console.log('[auth] smtp check: ok'); })
-    .catch(e=>{ smtpStatus='FAILED — '+String(e.message||e).slice(0,120); console.error('[auth] smtp check failed:', e.message); }); }, 3000);
+  setTimeout(async ()=>{
+    const results = [];
+    for(const port of [SMTP_PORT, SMTP_ALT_PORT]){
+      try { const m = await smtpTransport(port); await m.verify(); results.push(`${port}: ok`); smtpWorkingPort = port; }
+      catch(e){ results.push(`${port}: ${String(e.message||e).slice(0,70)}`); }
+      if(smtpWorkingPort) break;
+    }
+    smtpStatus = results.join(' · ');
+    if(!smtpWorkingPort) smtpStatus += /timeout/i.test(smtpStatus)
+      ? ' — host firewall likely blocks SMTP; add BREVO_API_KEY or RESEND_API_KEY instead'
+      : ' — check SMTP_USER / SMTP_PASS (Gmail needs an App Password)';
+    console.log('[auth] smtp check:', smtpStatus);
+  }, 3000);
 }
 async function sendEmailMsg(to, subject, text){
   if(!emailEnabled) return false;
   try {
     if(smtpEnabled){
-      try {
-        const m = await smtpTransport();
-        await m.sendMail({ from: EMAIL_FROM, to, subject, text });
-        return true;
-      } catch(e){
-        console.error('email send (smtp)', e.message);
-        // some hosts (Render free tier) firewall all SMTP ports — fall through to
-        // an HTTPS API provider when one is configured instead of failing outright
-        if(!RESEND_API_KEY && !BREVO_API_KEY) return false;
+      // use the port that worked last; otherwise try configured then alternate
+      const ports = smtpWorkingPort ? [smtpWorkingPort] : [SMTP_PORT, SMTP_ALT_PORT];
+      for(const port of ports){
+        try {
+          const m = await smtpTransport(port);
+          await m.sendMail({ from: EMAIL_FROM, to, subject, text });
+          smtpWorkingPort = port;
+          return true;
+        } catch(e){ console.error(`email send (smtp:${port})`, e.message); }
       }
+      // all SMTP ports failed (some hosts firewall them) — fall through to an
+      // HTTPS API provider when one is configured instead of failing outright
+      if(!RESEND_API_KEY && !BREVO_API_KEY) return false;
     }
     if(RESEND_API_KEY){
       const r = await fetch('https://api.resend.com/emails', {
