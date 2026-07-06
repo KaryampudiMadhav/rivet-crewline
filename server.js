@@ -45,6 +45,9 @@ const TWILIO_SID = process.env.TWILIO_SID || '';
 const TWILIO_TOKEN = process.env.TWILIO_TOKEN || '';
 const TWILIO_FROM = process.env.TWILIO_FROM || '';
 const smsEnabled = !!(TWILIO_SID && TWILIO_TOKEN && TWILIO_FROM);
+// comma-separated emails that may access /admin (credential review, moderation)
+const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+const isAdmin = (u) => !!(u && ADMIN_EMAILS.includes(String(u.email||'').toLowerCase()));
 
 function normPhone(s){ return String(s||'').trim().replace(/[^\d+]/g,''); }
 function validPhone(s){ return normPhone(s).replace(/\D/g,'').length >= 10; }
@@ -854,6 +857,25 @@ const server = http.createServer(async (req,res)=>{
       res.writeHead(404); return res.end('not found');
     }
     if(p==='/og.svg'){ res.writeHead(200,{'Content-Type':'image/svg+xml','Cache-Control':'public, max-age=86400'}); return res.end(V.ogImage()); }
+    // ---- legal & PWA (public) ----
+    if(p==='/terms' && method==='GET') return send(res, V.layout({title:'Terms of Service', user, body:V.legalPage('terms', user)}));
+    if(p==='/privacy' && method==='GET') return send(res, V.layout({title:'Privacy Policy', user, body:V.legalPage('privacy', user)}));
+    if(p==='/eeo' && method==='GET') return send(res, V.layout({title:'Equal Opportunity', user, body:V.legalPage('eeo', user)}));
+    if(p==='/manifest.webmanifest'){
+      res.writeHead(200,{'Content-Type':'application/manifest+json','Cache-Control':'public, max-age=86400'});
+      return res.end(JSON.stringify({ name:'Rivet × Crewline', short_name:'Rivet', description:'The blue-collar hiring platform.',
+        start_url:'/', display:'standalone', background_color:'#F2F6FA', theme_color:'#13212B',
+        icons:[{ src:'/icon.svg', sizes:'any', type:'image/svg+xml', purpose:'any' }] }));
+    }
+    if(p==='/icon.svg'){
+      res.writeHead(200,{'Content-Type':'image/svg+xml','Cache-Control':'public, max-age=86400'});
+      return res.end(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#13212B"/><rect x="96" y="96" width="320" height="320" rx="64" fill="#1E6FB5"/><text x="256" y="342" font-family="Georgia,serif" font-size="240" font-weight="bold" fill="#fff" text-anchor="middle">R</text></svg>`);
+    }
+    if(p==='/sw.js'){
+      res.writeHead(200,{'Content-Type':'application/javascript','Cache-Control':'no-cache'});
+      // minimal pass-through worker: enough for installability; no offline caching yet
+      return res.end("self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('activate',e=>self.clients.claim());self.addEventListener('fetch',()=>{});");
+    }
     if(p==='/healthz'){
       res.writeHead(200,{'Content-Type':'text/plain'});
       // feature flags (booleans only, never secrets) so misnamed env vars are easy to spot
@@ -1208,6 +1230,101 @@ const server = http.createServer(async (req,res)=>{
       }
     }
 
+    // ---- admin: credential review + moderation (emails in ADMIN_EMAILS only) ----
+    if(p.startsWith('/admin')){
+      if(!isAdmin(user)) return send(res, V.layout({title:'Not found',user,body:'<section class="wrap"><div class="card">Not found.</div></section>'}),404);
+      if(p==='/admin' && method==='GET'){
+        const q = String(url.searchParams.get('q')||'').trim().slice(0,80);
+        const pending = await db.prepare(`SELECT c.*, u.name uname, u.email uemail FROM credentials c JOIN users u ON u.id=c.user_id WHERE c.verify_status='pending' ORDER BY c.id DESC LIMIT 50`).all();
+        const users = q
+          ? await db.prepare(`SELECT id,name,email,role,phone,email_verified,created_at FROM users WHERE email LIKE ? OR name LIKE ? ORDER BY id DESC LIMIT 25`).all(`%${q}%`,`%${q}%`)
+          : await db.prepare(`SELECT id,name,email,role,phone,email_verified,created_at FROM users ORDER BY id DESC LIMIT 12`).all();
+        const jobs = await db.prepare(`SELECT j.id,j.title,j.status,j.city,j.created_at,u.company FROM jobs j JOIN users u ON u.id=j.employer_id WHERE COALESCE(j.source,'Rivet')='Rivet' ORDER BY j.id DESC LIMIT 15`).all();
+        const stats = {
+          users: (await db.prepare('SELECT COUNT(*) c FROM users').get()).c,
+          workers: (await db.prepare("SELECT COUNT(*) c FROM users WHERE role='worker'").get()).c,
+          openJobs: (await db.prepare("SELECT COUNT(*) c FROM jobs WHERE status='open'").get()).c,
+          verified: (await db.prepare("SELECT COUNT(*) c FROM credentials WHERE verify_status='verified'").get()).c,
+          pending: pending.length,
+        };
+        return send(res, V.layout({title:'Admin',user,body:V.adminPanel({pending,users,jobs,stats,q})}));
+      }
+      const credAct = p.match(/^\/admin\/creds\/(\d+)\/(approve|reject)$/);
+      if(credAct && method==='POST'){
+        const cid = Number(credAct[1]);
+        const cred = await db.prepare('SELECT user_id FROM credentials WHERE id=?').get(cid);
+        if(cred){
+          if(credAct[2]==='approve') await db.prepare("UPDATE credentials SET verified=1, verify_status='verified' WHERE id=?").run(cid);
+          else await db.prepare("UPDATE credentials SET verified=0, verify_status='rejected' WHERE id=?").run(cid);
+          await recomputeReadiness(cred.user_id); // verified creds move real match scores
+        }
+        return redirect(res,'/admin');
+      }
+      const proofView = p.match(/^\/admin\/proof\/(\d+)$/);
+      if(proofView && method==='GET'){
+        const cred = await db.prepare('SELECT proof_url FROM credentials WHERE id=?').get(Number(proofView[1]));
+        const pr = cred && cred.proof_url || '';
+        const m = pr.match(/^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/s);
+        if(m){ res.writeHead(200,{'Content-Type':m[1]}); return res.end(Buffer.from(m[2],'base64')); }
+        if(/^https?:\/\//i.test(pr)) return redirect(res, pr);
+        return redirect(res,'/admin');
+      }
+      const jobClose = p.match(/^\/admin\/jobs\/(\d+)\/close$/);
+      if(jobClose && method==='POST'){
+        await db.prepare("UPDATE jobs SET status='closed' WHERE id=?").run(Number(jobClose[1]));
+        return redirect(res,'/admin');
+      }
+    }
+
+    // ---- account deletion (GDPR-style; linked from /privacy and profile) ----
+    if(p==='/account/delete' && method==='POST'){
+      if(!user) return redirect(res,'/login');
+      const uid = user.id;
+      try {
+        if(user.role==='employer'){
+          const jids = (await db.prepare('SELECT id FROM jobs WHERE employer_id=?').all(uid)).map(r=>r.id);
+          for(const jid of jids){
+            for(const t of ['applications','quotes','interviews']) await db.prepare(`DELETE FROM ${t} WHERE job_id=?`).run(jid);
+          }
+          await db.prepare('DELETE FROM jobs WHERE employer_id=?').run(uid);
+          await db.prepare('DELETE FROM shift_claims WHERE shift_id IN (SELECT id FROM shifts WHERE employer_id=?)').run(uid);
+          await db.prepare('DELETE FROM shifts WHERE employer_id=?').run(uid);
+          await db.prepare('DELETE FROM saved_candidates WHERE employer_id=?').run(uid);
+        } else {
+          for(const t of ['worker_profiles','credentials','work_history']) await db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
+          for(const t of ['applications','saved_jobs','shift_claims','quotes','interviews','crew_members','saved_candidates']) await db.prepare(`DELETE FROM ${t} WHERE worker_id=?`).run(uid);
+        }
+        await db.prepare('DELETE FROM messages WHERE from_id=? OR to_id=?').run(uid, uid);
+        await db.prepare('DELETE FROM media WHERE user_id=?').run(uid);
+        await db.prepare('DELETE FROM reviews WHERE author_id=? OR subject_id=?').run(uid, uid);
+        await db.prepare('DELETE FROM notes WHERE author_id=? OR worker_id=?').run(uid, uid);
+        await db.prepare('DELETE FROM email_otp WHERE email=?').run(user.email);
+        await db.prepare('DELETE FROM users WHERE id=?').run(uid);
+      } catch(e){ console.error('account delete', e.message); }
+      clearSession(req, res);
+      return redirect(res,'/');
+    }
+
+    // ---- calendar invite for a confirmed interview (worker or employer) ----
+    const icsm = p.match(/^\/ics\/interview\/(\d+)$/);
+    if(icsm && method==='GET'){
+      if(!user) return redirect(res,'/login');
+      const iv = await db.prepare(`SELECT iv.*, j.title, j.city, u.company FROM interviews iv JOIN jobs j ON j.id=iv.job_id JOIN users u ON u.id=iv.employer_id
+        WHERE iv.id=? AND (iv.worker_id=? OR iv.employer_id=?)`).get(Number(icsm[1]), user.id, user.id);
+      if(!iv || iv.status!=='confirmed' || !iv.chosen) return redirect(res, user.role==='employer'?'/console/interviews':'/app/offers');
+      const start = new Date(iv.chosen);
+      if(isNaN(start.getTime())) return redirect(res,'/');
+      const fmt = (t)=> t.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'');
+      const end = new Date(start.getTime() + 60*60*1000);
+      const ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Rivet x Crewline//EN','BEGIN:VEVENT',
+        `UID:rivet-interview-${iv.id}@rivet-crewline`,`DTSTAMP:${fmt(new Date())}`,`DTSTART:${fmt(start)}`,`DTEND:${fmt(end)}`,
+        `SUMMARY:Interview — ${String(iv.title||'').replace(/[\n,;]/g,' ')} (${String(iv.company||'').replace(/[\n,;]/g,' ')})`,
+        `DESCRIPTION:Scheduled via Rivet × Crewline`,`LOCATION:${String(iv.city||'').replace(/[\n,;]/g,' ')}`,
+        'END:VEVENT','END:VCALENDAR'].join('\r\n');
+      res.writeHead(200,{'Content-Type':'text/calendar; charset=utf-8','Content-Disposition':`attachment; filename=rivet-interview-${iv.id}.ics`});
+      return res.end(ics);
+    }
+
     // ---- worker (Rivet) ----
     if(p.startsWith('/app')){
       if(!user) return redirect(res,'/login');
@@ -1506,12 +1623,17 @@ const server = http.createServer(async (req,res)=>{
       const credVerify = p.match(/^\/app\/credentials\/(\d+)\/verify$/);
       if(credVerify && method==='POST'){
         const cid = Number(credVerify[1]); const b = await readBody(req);
-        let proof = String(b.proof_url||'').trim().slice(0,500);
-        if(proof && !/^https?:\/\//i.test(proof)) proof = 'https://'+proof;
-        // Attaching proof closes the loop: the credential becomes verified ("proof on file"),
-        // which a recruiter can inspect via the proof link. Without proof it stays self-reported.
+        // Proof can be an uploaded photo (data-URL from the browser, capped) or a link.
+        let proof = String(b.proof_data||'').trim();
+        if(proof && !(/^data:image\/(png|jpe?g|webp);base64,/.test(proof) && proof.length <= 900000)) proof = '';
+        if(!proof){
+          proof = String(b.proof_url||'').trim().slice(0,500);
+          if(proof && !/^https?:\/\//i.test(proof)) proof = 'https://'+proof;
+        }
+        // Real verification: proof puts the credential IN REVIEW (pending). A human approves
+        // it in /admin before the "Verified" badge — the homepage promise, kept honestly.
         if(proof){
-          await db.prepare("UPDATE credentials SET proof_url=?, verified=1, verify_status='verified' WHERE id=? AND user_id=?").run(proof, cid, user.id);
+          await db.prepare("UPDATE credentials SET proof_url=?, verified=0, verify_status='pending' WHERE id=? AND user_id=?").run(proof, cid, user.id);
           await recomputeReadiness(user.id);
         }
         return redirect(res,'/app/profile');

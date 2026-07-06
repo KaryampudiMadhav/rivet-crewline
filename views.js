@@ -487,7 +487,9 @@ function layout({ title, user, body, active = '', flash = '' }) {
   <link rel="stylesheet" href="/vendor/markercluster/MarkerCluster.css">
   <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/vendor/markercluster/leaflet.markercluster.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=113">
+  <link rel="stylesheet" href="/styles.css?v=114">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <script>if('serviceWorker' in navigator) addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));</script>
   </head><body class="${user?'app-mode':'mkt-mode'}">
   <a class="skip" href="#main">Skip to main content</a>
   ${user ? `
@@ -507,7 +509,7 @@ function layout({ title, user, body, active = '', flash = '' }) {
       </header>
       ${flash?`<div class="flash wrap">${esc(flash)}</div>`:''}
       <main id="main">${body}</main>
-      <footer class="site-foot">Rivet × Crewline — blue-collar hiring platform</footer>
+      <footer class="site-foot">Rivet × Crewline — blue-collar hiring platform · <a href="/terms">${T('Terms')}</a> · <a href="/privacy">${T('Privacy')}</a> · <a href="/eeo">${T('EEO')}</a></footer>
     </div>
   </div>
   ${voiceAgent(user.mode || user.role)}`
@@ -521,7 +523,7 @@ function layout({ title, user, body, active = '', flash = '' }) {
         <p>${t('foot_tagline')}</p></div>
       <div class="foot-col"><h5>${t('foot_for_workers')}</h5><a href="/signup?role=worker">${t('foot_get_started')}</a><a href="/login">${t('nav_login')}</a></div>
       <div class="foot-col"><h5>${t('foot_for_employers')}</h5><a href="/signup?role=employer">${t('foot_post_job')}</a><a href="/login">${t('nav_login')}</a></div>
-      <div class="foot-col"><h5>${T('Resources')}</h5><a href="/work-authorization">${T('Work in the U.S.')}</a><a href="/pulse">${t('nav_pulse')}</a></div>
+      <div class="foot-col"><h5>${T('Resources')}</h5><a href="/work-authorization">${T('Work in the U.S.')}</a><a href="/pulse">${t('nav_pulse')}</a><a href="/terms">${T('Terms')}</a><a href="/privacy">${T('Privacy')}</a><a href="/eeo">${T('EEO')}</a></div>
     </div>
     <div class="wrap foot-base">© 2026 Rivet × Crewline · Phoenix, AZ · <a href="/lang/${LANG==='es'?'en':'es'}" style="color:#9fb0bb">${LANG==='es'?'English':'Español'}</a></div>
   </footer>`}
@@ -1608,17 +1610,23 @@ function credRow(c, editable = false){
   const st = c.verify_status || (c.verified ? 'verified' : 'unverified');
   const soon = c.verified && c.expires && c.expires < '2026-08';
   const ic = st==='verified' ? `<span class="cred-st ok">${icon('check')}</span>`
-    : (st==='review' ? `<span class="cred-st rev"></span>` : `<span class="cred-st un"></span>`);
+    : (st==='pending'||st==='review' ? `<span class="cred-st rev"></span>` : `<span class="cred-st un"></span>`);
   const badge = st==='verified'
     ? `<span class="v ${soon?'soon':'ok'}">${soon?T('Expiring'):T('Verified')}</span>`
-    : (st==='review' ? `<span class="v review">${T('In review')}</span>` : `<span class="v pending">${T('Self-reported')}</span>`);
-  const reqForm = (editable && st!=='verified') ? `<form method="post" action="/app/credentials/${c.id}/verify" class="cred-verify">
-      <input name="proof_url" placeholder="${T('Link to proof (card photo, license #, URL)')}" maxlength="500"${st==='review'&&c.proof_url?` value="${esc(c.proof_url)}"`:''}>
-      <button class="btn-xs">${st==='review'?T('Update'):T('Request verification')}</button>
+    : st==='pending'||st==='review' ? `<span class="v review">${T('In review')}</span>`
+    : st==='rejected' ? `<span class="v pending" style="background:rgba(220,75,62,.12);color:#B3372C">${T('Rejected — resubmit')}</span>`
+    : `<span class="v pending">${T('Self-reported')}</span>`;
+  const proofIsData = (c.proof_url||'').startsWith('data:');
+  const reqForm = (editable && st!=='verified' && st!=='pending') ? `<form method="post" action="/app/credentials/${c.id}/verify" class="cred-verify">
+      <input type="hidden" name="proof_data">
+      <input name="proof_url" placeholder="${T('Link to proof (license #, URL)')}" maxlength="500">
+      <label class="btn-xs" style="cursor:pointer">${T('📷 Photo')}<input type="file" accept="image/*" hidden onchange="(function(i){var f=i.files[0];if(!f)return;if(f.size>600000){alert('${T('Max 600 KB — take a smaller photo')}');i.value='';return;}var r=new FileReader();r.onload=function(){i.form.proof_data.value=r.result;i.form.submit();};r.readAsDataURL(f);})(this)"></label>
+      <button class="btn-xs">${T('Submit for review')}</button>
     </form>` : '';
+  const note = (editable && (st==='pending'||st==='review')) ? `<div class="cred-ex">${T('Our team reviews proofs within 48h.')}</div>` : '';
   return `<div class="cred">
     <div class="cred-ic">${ic}</div>
-    <div class="cred-main"><div class="cred-nm">${esc(c.name)}</div><div class="cred-ex">${c.expires?('exp '+esc(c.expires)):'no expiry'}${c.proof_url&&st!=='verified'?` · <a href="${esc(c.proof_url)}" target="_blank" rel="noopener">${T('proof ↗')}</a>`:''}</div>${reqForm}</div>
+    <div class="cred-main"><div class="cred-nm">${esc(c.name)}</div><div class="cred-ex">${c.expires?('exp '+esc(c.expires)):'no expiry'}${c.proof_url&&st!=='verified'&&!proofIsData?` · <a href="${esc(c.proof_url)}" target="_blank" rel="noopener">${T('proof ↗')}</a>`:''}${c.proof_url&&proofIsData&&st!=='verified'?` · ${T('photo attached')}`:''}</div>${note}${reqForm}</div>
     ${badge}
   </div>`;
 }
@@ -1919,7 +1927,8 @@ function workerOffers({ requests = [], interested = [], pending = 0, count = 0 }
       </div>`).join('')}` : ''}
     ${confirmed.length ? `<div class="sec-h big" style="margin-top:22px">${T('Confirmed interviews')}</div>
       ${confirmed.map(iv=>`<div class="card offer-card ok"><div class="oc-top"><div class="badge">${tradeEmoji(iv.trade)}</div>
-        <div class="oc-main"><h4>${esc(iv.title||'')}</h4><div class="muted">${esc(iv.company||'')}</div></div></div>${interviewWorker(iv)}</div>`).join('')}` : ''}
+        <div class="oc-main"><h4>${esc(iv.title||'')}</h4><div class="muted">${esc(iv.company||'')}</div></div></div>${interviewWorker(iv)}
+        <div class="oc-act"><a class="btn-xs ghost" href="/ics/interview/${iv.id}">${T('📅 Add to calendar')}</a></div></div>`).join('')}` : ''}
     ${interested.length ? `<div class="sec-h big" style="margin-top:22px">${T('Employers interested in you')} <span class="hot-ct soft">${interested.length}</span></div>
       <p class="muted sm" style="margin-top:-6px">${T('These employers saved your Work Card. Message them to get on their radar before the interview request.')}</p>
       ${interested.map(e=>`<div class="card offer-card"><div class="oc-top"><div class="badge">${icon('company','xic')}</div>
@@ -3845,5 +3854,75 @@ function whyRivetBlock(){
   </div>`;
 }
 
-module.exports = { setLang, setEs, drainEsMisses, layout, landing, authForm, phoneStart, phoneVerify, verifyEmail, workerOnboard, workerHome, workerJobs,
+// ---------- admin: credential review + moderation ----------
+function adminPanel({ pending, users, jobs, stats, q }){
+  return `<section class="wrap">
+    <h2 style="margin:14px 0 4px">Admin</h2>
+    <p class="muted sm">Credential review, user lookup, job moderation. Access limited to ADMIN_EMAILS.</p>
+    <div class="card" style="display:flex;gap:22px;flex-wrap:wrap">
+      ${Object.entries({'Users':stats.users,'Workers':stats.workers,'Open jobs':stats.openJobs,'Verified creds':stats.verified,'Pending review':stats.pending}).map(([k,v])=>
+        `<div><b style="font-size:20px">${v}</b><div class="muted sm">${k}</div></div>`).join('')}
+    </div>
+    <div class="sec-h big">Credential review queue ${stats.pending?`<span class="hot-ct">${stats.pending}</span>`:''}</div>
+    ${pending.length ? pending.map(c=>`<div class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px"><b>${esc(c.name)}</b> <span class="muted sm">(${esc(c.kind)})</span>
+          <div class="muted sm">${esc(c.uname)} · ${esc(c.uemail)} ${c.expires?`· exp ${esc(c.expires)}`:''}</div></div>
+        <a class="btn-xs ghost" href="/admin/proof/${c.id}" target="_blank" rel="noopener">View proof ↗</a>
+        <form method="post" action="/admin/creds/${c.id}/approve"><button class="btn-xs">✓ Approve</button></form>
+        <form method="post" action="/admin/creds/${c.id}/reject"><button class="btn-xs ghost" style="color:#B3372C">✕ Reject</button></form>
+      </div>`).join('') : `<div class="card muted">Queue is empty — nothing awaiting review.</div>`}
+    <div class="sec-h big">Users</div>
+    <form method="get" action="/admin" class="inline-form" style="margin-bottom:10px">
+      <input name="q" value="${esc(q||'')}" placeholder="Search email or name"><button class="btn-sm">Search</button>
+    </form>
+    <div class="card" style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr style="text-align:left"><th>id</th><th>name</th><th>email</th><th>role</th><th>verified</th><th>joined</th></tr>
+      ${users.map(u=>`<tr style="border-top:1px solid var(--line)"><td>${u.id}</td><td>${esc(u.name||'')}</td><td>${esc(u.email||'')}</td><td>${esc(u.role)}</td><td>${u.email_verified===0?'✕':'✓'}</td><td class="muted">${esc(String(u.created_at||'').slice(0,10))}</td></tr>`).join('')}
+    </table></div>
+    <div class="sec-h big">Recent jobs (posted on Rivet)</div>
+    ${jobs.map(j=>`<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px"><b>${esc(j.title||'')}</b><div class="muted sm">${esc(j.company||'')} · ${esc(j.city||'')} · ${esc(j.status)}</div></div>
+      ${j.status==='open'?`<form method="post" action="/admin/jobs/${j.id}/close"><button class="btn-xs ghost" style="color:#B3372C">Close job</button></form>`:''}
+    </div>`).join('')}
+  </section>`;
+}
+
+// ---------- legal pages (plain-language templates — have counsel review before scale) ----------
+function legalPage(kind, user){
+  const del = user ? `<div class="card" style="margin-top:18px"><div class="sec-h" style="margin-top:0">${T('Delete my account')}</div>
+    <p class="muted sm">${T('Permanently removes your account, profile, credentials, applications, messages and media. This cannot be undone.')}</p>
+    <form method="post" action="/account/delete" onsubmit="return confirm('${T('Delete your account permanently? This cannot be undone.')}')">
+      <button class="btn-sm" style="background:#DC4B3E;color:#fff;border:0">${T('Delete my account permanently')}</button>
+    </form></div>` : `<p class="muted sm">${T('To delete your account, log in and return to this page.')}</p>`;
+  const body = kind==='terms' ? `
+    <h2>${T('Terms of Service')}</h2><p class="muted sm">Effective July 2026 · Plain-language template — not legal advice.</p>
+    <div class="card"><ol style="padding-left:18px;display:grid;gap:10px">
+      <li><b>${T('What Rivet × Crewline is.')}</b> ${T('A platform connecting blue-collar workers and employers: profiles, job listings, matching, messaging and scheduling. We are not a party to any employment relationship formed through the platform.')}</li>
+      <li><b>${T('Accounts.')}</b> ${T('You must provide accurate information. One account per person. We may suspend accounts that abuse the platform, misrepresent credentials, or harass others.')}</li>
+      <li><b>${T('Credentials & verification.')}</b> ${T('A "Verified" badge means our team reviewed the proof a worker submitted. It is a good-faith review, not a legal guarantee — employers remain responsible for their own final compliance checks.')}</li>
+      <li><b>${T('Job content.')}</b> ${T('Some listings are aggregated from employers’ public career feeds and link to the original source. We do not guarantee any listing’s availability or terms.')}</li>
+      <li><b>${T('Acceptable use.')}</b> ${T('No scraping, spam, discriminatory postings, or unlawful use. Employers must comply with all applicable employment and anti-discrimination laws.')}</li>
+      <li><b>${T('Liability.')}</b> ${T('The platform is provided "as is" without warranties; to the extent permitted by law our liability is limited to amounts you paid us in the past 12 months.')}</li>
+      <li><b>${T('Changes.')}</b> ${T('We may update these terms; continued use after changes means acceptance.')}</li>
+    </ol></div>`
+  : kind==='privacy' ? `
+    <h2>${T('Privacy Policy')}</h2><p class="muted sm">Effective July 2026 · Plain-language template — not legal advice.</p>
+    <div class="card"><ol style="padding-left:18px;display:grid;gap:10px">
+      <li><b>${T('What we collect.')}</b> ${T('Account details (name, email, phone), profile and work history you provide, credential proofs you upload, application and messaging activity, and basic technical logs.')}</li>
+      <li><b>${T('How we use it.')}</b> ${T('To run the platform: matching you with jobs or candidates, verification review, notifications you request, and preventing abuse. We do not sell your personal data.')}</li>
+      <li><b>${T('Who sees it.')}</b> ${T('Employers see your Work Card when you apply or appear in search. Credential proofs are visible only to our review team. Service providers (hosting, email, SMS) process data on our behalf.')}</li>
+      <li><b>${T('Security.')}</b> ${T('Passwords are hashed (scrypt), sessions are signed, transport is encrypted, and OTP/anti-abuse rate limits protect accounts.')}</li>
+      <li><b>${T('Retention & deletion.')}</b> ${T('Data is kept while your account is active. Delete your account below and your profile, credentials, applications, messages and media are removed.')}</li>
+      <li><b>${T('Contact.')}</b> ${T('Questions: reply to any email from us or use the contact details on the site.')}</li>
+    </ol></div>
+    ${del}`
+  : `
+    <h2>${T('Equal Employment Opportunity')}</h2>
+    <div class="card"><p>${T('Rivet × Crewline is built for fair hiring. Employers using the platform must comply with all applicable equal-opportunity laws and may not discriminate on the basis of race, color, religion, sex, national origin, age, disability, veteran status, or any other protected characteristic.')}</p>
+    <p style="margin-top:10px">${T('The product actively supports inclusive hiring: fair-chance flags for applicants with records, veteran-friendly job tagging, bilingual (EN/ES) experience, and transparent matching based on skills, credentials, pay and distance — not demographics.')}</p>
+    <p class="muted sm" style="margin-top:10px">${T('If you believe a listing violates this policy, report it via any contact channel and we will review it.')}</p></div>`;
+  return `<section class="wrap narrow" style="padding:26px 16px">${body}</section>`;
+}
+
+module.exports = { setLang, setEs, drainEsMisses, layout, landing, authForm, phoneStart, phoneVerify, verifyEmail, adminPanel, legalPage, workerOnboard, workerHome, workerJobs,
   jobDetail, workerProfile, resumeDoc, workerApplications, workerOffers, publicPortfolio, empOverview, empAnalytics, empJobs, empJobForm, empPipeline, empSearch, empCandidate, empShortlist, inbox, ogImage, STAGES, JOB_TYPES, DURATIONS, empCompany, workerTraining, pulsePage, publicJob, workerCoach, agentApplyResult, onboardChat, agentsHub, workHub, SPONSORSHIP, SECTOR_META, sectorHub, sectorPage, mockInterview, LEARN_TRACKS, ROLE_BLS, careerHub, careerGuide, landJob, trustVerdict, trustCard, earnLearn, credPrep, credPrepIndex, credPath, gradeQuiz, skillCheckIndex, skillCheck, gradeSkill, skillKeyFor, parseSkillchecks, skillVerifiedRow, growHub, invitePage, shiftsBoard, sourcingAgent, empShifts, empShiftForm, voiceAgent, whyPage, SHIFT_KINDS, REGISTRY };
